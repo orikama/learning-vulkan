@@ -1,6 +1,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <functional>
+#include <optional>
+
 #include <cstring>
 #include <cstdlib>
 
@@ -12,7 +14,7 @@
 #include <glm/vec4.hpp>
 #include <glm/mat4x4.hpp>
 
-
+// ---------------------- FOR DEBUG PURPOSES ----------------------
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
 };
@@ -23,6 +25,7 @@ const std::vector<const char*> validationLayers = {
     const bool enableValidationLayers = true;
 #endif
 
+// ------------------ LOADING EXTENSION FUNCTIONS ------------------
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance,
                                       const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
                                       const VkAllocationCallbacks* pAllocator,
@@ -49,6 +52,17 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance,
     }
 }
 
+// ---------------------- ------------------ ----------------------
+struct QueueFamilyIndices
+{
+    std::optional<uint32_t> graphicsFamily;
+
+    bool isComplete()
+    {
+        return graphicsFamily.has_value();
+    }
+};
+
 
 class HelloTriangleApplication
 {
@@ -69,6 +83,8 @@ private:
 
     VkInstance m_vkInstance = nullptr;
     VkDebugUtilsMessengerEXT m_debugMessenger = nullptr;
+    VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
+
 
     void initWindow()
     {
@@ -84,6 +100,7 @@ private:
     {
         createVkInstance();
         setupDebugMessanger();
+        pickPhysicalDevice();
     }
 
     void mainLoop()
@@ -172,6 +189,67 @@ private:
         if (CreateDebugUtilsMessengerEXT(m_vkInstance, &createInfo, nullptr, &m_debugMessenger) != VK_SUCCESS) {
             throw std::runtime_error("Failed to set up debug messenger");
         }
+    }
+
+    void pickPhysicalDevice()
+    {
+        uint32_t physicalDeviceCount = 0;
+        vkEnumeratePhysicalDevices(m_vkInstance, &physicalDeviceCount, nullptr);
+
+        if (physicalDeviceCount == 0) {
+            throw std::runtime_error("Failed to find GPUs with Vulkan support.");
+        }
+
+        std::vector<VkPhysicalDevice> physicalDevices(physicalDeviceCount);
+        vkEnumeratePhysicalDevices(m_vkInstance, &physicalDeviceCount, physicalDevices.data());
+        
+        for (const auto& device : physicalDevices) {
+            if (isDeviceSuitable(device)) {
+                m_physicalDevice = device;
+                break;
+            }
+        }
+
+        if (m_physicalDevice == VK_NULL_HANDLE) {
+            throw std::runtime_error("Failed to find a suitable GPU.");
+        }
+    }
+
+    bool isDeviceSuitable(VkPhysicalDevice physicalDevice)
+    {
+        QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+
+        return indices.isComplete();
+    }
+
+    QueueFamilyIndices findQueueFamilies(VkPhysicalDevice physicalDevice)
+    {
+        QueueFamilyIndices indices;
+
+        uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+
+        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+        uint32_t i = 0;
+        for (const auto& queueFamily : queueFamilies) {
+            if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                indices.graphicsFamily = i;
+            }
+
+            // "You should use the queue families that provide the least functionality you need."
+            // So may be need to find queueFamily with the least queueCount
+            // and this condition is not suited for that purpose.
+            // of course taking into account that this is just a tutorial and it's not suiting almost for anything
+            if (indices.isComplete()) {
+                break;
+            }
+
+            ++i;
+        }
+
+        return indices;
     }
 
     std::vector<const char*> getRequiredExtensions()
