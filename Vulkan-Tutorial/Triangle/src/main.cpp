@@ -1,4 +1,6 @@
 #include <iostream>
+#include <fstream>
+#include <filesystem>
 #include <algorithm>
 #include <stdexcept>
 #include <functional>
@@ -104,6 +106,9 @@ public:
     }
 
 private:
+    const char* kPathToVertexShaderCode = "shaders/vert.spv";
+    const char* kPathToFragmentShaderCode = "shaders/frag.spv";
+
     GLFWwindow* m_window = nullptr;
 
     VkInstance m_vkInstance = nullptr;
@@ -141,6 +146,7 @@ private:
         createLogicalDevice();
         createSwapChain();
         createImageViews();
+        createGraphicsPipeline();
     }
 
     void mainLoop()
@@ -402,6 +408,50 @@ private:
         }
     }
 
+    void createGraphicsPipeline()
+    {
+        auto vertShaderCode = readFile(kPathToVertexShaderCode);
+        auto fragShaderCode = readFile(kPathToFragmentShaderCode);
+
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+        
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo = {};
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule;
+        vertShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo = {};
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStagesCreateInfo[] = {
+            vertShaderStageInfo,
+            fragShaderStageInfo
+        };
+
+        vkDestroyShaderModule(m_logicalDevice, vertShaderModule, nullptr);
+        vkDestroyShaderModule(m_logicalDevice, fragShaderModule, nullptr);
+    }
+
+    VkShaderModule createShaderModule(const std::vector<char>& shaderCode)
+    {
+        VkShaderModuleCreateInfo shaderModuleInfo = {};
+        shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        shaderModuleInfo.codeSize = shaderCode.size();
+        shaderModuleInfo.pCode = reinterpret_cast<const uint32_t*>(shaderCode.data());
+
+        VkShaderModule shaderModule;
+        if (vkCreateShaderModule(m_logicalDevice, &shaderModuleInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create shader module.");
+        }
+
+        return shaderModule;
+    }
+
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats)
     {
         for (const auto& availableFormat : availableFormats) {
@@ -614,6 +664,23 @@ private:
         return true;
     }
 
+    static std::vector<char> readFile(const std::string& path)
+    {
+        size_t fileSize = static_cast<size_t>(std::filesystem::file_size(path));
+        std::vector<char> buffer(fileSize);
+
+        std::ifstream file(path, std::ifstream::binary);
+
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open shader file: " + path);
+        }
+        
+        file.read(buffer.data(), fileSize);
+        file.close();
+
+        return buffer;
+    }
+
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
                                                         VkDebugUtilsMessageTypeFlagsEXT messageType,
                                                         const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
@@ -632,6 +699,10 @@ int main()
     try {
         app.Run();
     }
+    /*catch (std::filesystem::filesystem_error& ex) {
+        std::cerr << ex.what() << std::endl;
+        return EXIT_FAILURE;
+    }*/
     catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
