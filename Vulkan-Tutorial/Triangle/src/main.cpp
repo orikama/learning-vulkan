@@ -120,6 +120,7 @@ private:
     std::vector<VkImage> m_swapchainImages;
     VkFormat m_swapchainImageFormat;
     VkExtent2D m_swapchainExtent = { 0, 0 };
+    std::vector<VkImageView> m_swapchainImageViews;
 
     void initWindow()
     {
@@ -139,6 +140,7 @@ private:
         pickPhysicalDevice();
         createLogicalDevice();
         createSwapChain();
+        createImageViews();
     }
 
     void mainLoop()
@@ -150,6 +152,10 @@ private:
 
     void cleanup()
     {
+        for (auto& imageView : m_swapchainImageViews) {
+            vkDestroyImageView(m_logicalDevice, imageView, nullptr);
+        }
+
         vkDestroySwapchainKHR(m_logicalDevice, m_swapchain, nullptr);
         vkDestroyDevice(m_logicalDevice, nullptr);
 
@@ -367,6 +373,33 @@ private:
 
         m_swapchainImageFormat = surfaceFormat.format;
         m_swapchainExtent = extent2d;
+    }
+
+    void createImageViews()
+    {
+        VkImageViewCreateInfo createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        createInfo.format = m_swapchainImageFormat;
+        createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        createInfo.subresourceRange.baseMipLevel = 0u;
+        createInfo.subresourceRange.levelCount = 1u;
+        createInfo.subresourceRange.baseArrayLayer = 0u;
+        createInfo.subresourceRange.layerCount = 1u;
+
+        m_swapchainImageViews.resize(m_swapchainImages.size());
+
+        for (size_t i = 0; i < m_swapchainImages.size(); ++i) {
+            createInfo.image = m_swapchainImages[i];
+
+            if (vkCreateImageView(m_logicalDevice, &createInfo, nullptr, &m_swapchainImageViews[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create image views.");
+            }
+        }
     }
 
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats)
