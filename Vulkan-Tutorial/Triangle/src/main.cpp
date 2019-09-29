@@ -127,6 +127,7 @@ private:
     VkExtent2D m_swapchainExtent = { 0, 0 };
     std::vector<VkImageView> m_swapchainImageViews;
 
+    VkRenderPass m_renderPass = nullptr;
     VkPipelineLayout m_pipelineLayout = nullptr;
 
     void initWindow()
@@ -148,6 +149,7 @@ private:
         createLogicalDevice();
         createSwapChain();
         createImageViews();
+        createRenderPass();
         createGraphicsPipeline();
     }
 
@@ -161,6 +163,7 @@ private:
     void cleanup()
     {
         vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
+        vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
 
         for (auto& imageView : m_swapchainImageViews) {
             vkDestroyImageView(m_logicalDevice, imageView, nullptr);
@@ -409,6 +412,39 @@ private:
             if (vkCreateImageView(m_logicalDevice, &createInfo, nullptr, &m_swapchainImageViews[i]) != VK_SUCCESS) {
                 throw std::runtime_error("Failed to create image views.");
             }
+        }
+    }
+
+    void createRenderPass()
+    {
+        VkAttachmentDescription colorAttachment = {};
+        colorAttachment.format = m_swapchainImageFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference colorAttachmentReference = {};
+        colorAttachmentReference.attachment = 0u;
+        colorAttachmentReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1u;
+        subpass.pColorAttachments = &colorAttachmentReference;
+
+        VkRenderPassCreateInfo renderPassInfo = {};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1u;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1u;
+        renderPassInfo.pSubpasses = &subpass;
+
+        if (vkCreateRenderPass(m_logicalDevice, &renderPassInfo, nullptr, &m_renderPass) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create render pass.");
         }
     }
 
