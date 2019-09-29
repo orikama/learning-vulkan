@@ -126,6 +126,7 @@ private:
     VkFormat m_swapchainImageFormat;
     VkExtent2D m_swapchainExtent = { 0, 0 };
     std::vector<VkImageView> m_swapchainImageViews;
+    std::vector<VkFramebuffer> m_swapchainFramebuffers;
 
     VkRenderPass m_renderPass = nullptr;
     VkPipelineLayout m_pipelineLayout = nullptr;
@@ -152,6 +153,7 @@ private:
         createImageViews();
         createRenderPass();
         createGraphicsPipeline();
+        createFramebuffers();
     }
 
     void mainLoop()
@@ -163,6 +165,10 @@ private:
 
     void cleanup()
     {
+        for (auto& framebuffer : m_swapchainFramebuffers) {
+            vkDestroyFramebuffer(m_logicalDevice, framebuffer, nullptr);
+        }
+
         vkDestroyPipeline(m_logicalDevice, m_graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
         vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
@@ -573,6 +579,27 @@ private:
 
         vkDestroyShaderModule(m_logicalDevice, vertShaderModule, nullptr);
         vkDestroyShaderModule(m_logicalDevice, fragShaderModule, nullptr);
+    }
+
+    void createFramebuffers()
+    {
+        VkFramebufferCreateInfo framebufferInfo = {};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = m_renderPass;
+        framebufferInfo.attachmentCount = 1u;
+        framebufferInfo.width = m_swapchainExtent.width;
+        framebufferInfo.height = m_swapchainExtent.height;
+        framebufferInfo.layers = 1u;
+
+        m_swapchainFramebuffers.resize(m_swapchainImageViews.size());
+
+        for (size_t i = 0; i < m_swapchainImageViews.size(); ++i) {
+            framebufferInfo.pAttachments = &m_swapchainImageViews[i];
+
+            if (vkCreateFramebuffer(m_logicalDevice, &framebufferInfo, nullptr, &m_swapchainFramebuffers[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create framebuffer.");
+            }
+        }
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& shaderCode)
