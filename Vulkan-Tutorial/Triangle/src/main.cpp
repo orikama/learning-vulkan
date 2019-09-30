@@ -97,6 +97,8 @@ public:
     const uint32_t kWindowWidth = 800;
     const uint32_t kWindowHeight = 600;
 
+    const uint32_t kMaxFramesInFlight = 2;
+
     void Run()
     {
         initWindow();
@@ -135,6 +137,11 @@ private:
     VkCommandPool m_commandPool = nullptr;
     std::vector<VkCommandBuffer> m_commandBuffers;
 
+    std::vector<VkSemaphore> m_imageAvailableSemaphores;
+    std::vector<VkSemaphore> m_renderFinishedSemaphores;
+    std::vector<VkFence> m_inFlightFences;
+    size_t m_currentFrame = 0;
+
     void initWindow()
     {
         glfwInit();
@@ -159,17 +166,27 @@ private:
         createFramebuffers();
         createCommandPool();
         createCommandBuffers();
+        createSyncObjects();
     }
 
     void mainLoop()
     {
         while (!glfwWindowShouldClose(m_window)) {
             glfwPollEvents();
+            drawFrame();
         }
+
+        vkDeviceWaitIdle(m_logicalDevice);
     }
 
     void cleanup()
     {
+        for (size_t i = 0; i < kMaxFramesInFlight; ++i) {
+            vkDestroySemaphore(m_logicalDevice, m_imageAvailableSemaphores[i], nullptr);
+            vkDestroySemaphore(m_logicalDevice, m_renderFinishedSemaphores[i], nullptr);
+            vkDestroyFence(m_logicalDevice, m_inFlightFences[i], nullptr);
+        }
+
         vkDestroyCommandPool(m_logicalDevice, m_commandPool, nullptr);
 
         for (auto& framebuffer : m_swapchainFramebuffers) {
@@ -451,12 +468,22 @@ private:
         subpass.colorAttachmentCount = 1u;
         subpass.pColorAttachments = &colorAttachmentReference;
 
+        VkSubpassDependency subpassDependency = {};
+        subpassDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        subpassDependency.dstSubpass = 0u;
+        subpassDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        subpassDependency.srcAccessMask = 0u;
+        subpassDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        subpassDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
         VkRenderPassCreateInfo renderPassInfo = {};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = 1u;
         renderPassInfo.pAttachments = &colorAttachment;
         renderPassInfo.subpassCount = 1u;
         renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1u;
+        renderPassInfo.pDependencies = &subpassDependency;
 
         if (vkCreateRenderPass(m_logicalDevice, &renderPassInfo, nullptr, &m_renderPass) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create render pass.");
@@ -665,6 +692,72 @@ private:
                 throw std::runtime_error("Failed to end recording command buffer.");
             }
         }
+    }
+
+    void createSyncObjects()
+    {
+        m_imageAvailableSemaphores.resize(kMaxFramesInFlight);
+        m_renderFinishedSemaphores.resize(kMaxFramesInFlight);
+        m_inFlightFences.resize(kMaxFramesInFlight);
+
+        VkSemaphoreCreateInfo semaphoreInfo = {};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        VkFenceCreateInfo fenceInfo = {};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        for (size_t i = 0; i < kMaxFramesInFlight; ++i) {
+            if (vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &m_imageAvailableSemaphores[i]) != VK_SUCCESS ||
+                vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &m_renderFinishedSemaphores[i]) != VK_SUCCESS ||
+                vkCreateFence(m_logicalDevice, &fenceInfo, nullptr, &m_inFlightFences[i]) != VK_SUCCESS) {
+
+                throw std::runtime_error("Failed to create semaphores.");
+            }
+        }
+    }
+
+    void drawFrame()
+    {
+        // TODO: use std::numeric_limits<uint64_t>::max() instead of UINT64_MAX ?
+        vkWaitForFences(m_logicalDevice, 1u, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
+        vkResetFences(m_logicalDevice, 1u, &m_inFlightFences[m_currentFrame]);
+
+        uint32_t imageIndex;
+        vkAcquireNextImageKHR(m_logicalDevice, m_swapchain, UINT64_MAX, m_imageAvailableSemaphores[m_currentFrame], VK_NULL_HANDLE, &imageIndex);
+        
+        VkSemaphore waitSemphores[] = { m_imageAvailableSemaphores[m_currentFrame] };
+        VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+
+        VkSemaphore signalSemaphores[] = { m_renderFinishedSemaphores[m_currentFrame] };
+
+        VkSubmitInfo submitInfo = {};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.waitSemaphoreCount = 1u;
+        submitInfo.pWaitSemaphores = waitSemphores;
+        submitInfo.pWaitDstStageMask = waitStages;
+        submitInfo.commandBufferCount = 1u;
+        submitInfo.pCommandBuffers = &m_commandBuffers[imageIndex];
+        submitInfo.signalSemaphoreCount = 1u;
+        submitInfo.pSignalSemaphores = signalSemaphores;
+        
+        if (vkQueueSubmit(m_graphicsQueue, 1u, &submitInfo, m_inFlightFences[m_currentFrame]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to submit draw command buffer");
+        }
+
+        VkSwapchainKHR swapchains[] = { m_swapchain };
+
+        VkPresentInfoKHR presentInfo = {};
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        presentInfo.waitSemaphoreCount = 1u;
+        presentInfo.pWaitSemaphores = signalSemaphores;
+        presentInfo.swapchainCount = 1u;
+        presentInfo.pSwapchains = swapchains;
+        presentInfo.pImageIndices = &imageIndex;
+
+        vkQueuePresentKHR(m_presentQueue, &presentInfo);
+
+        m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight;
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& shaderCode)
