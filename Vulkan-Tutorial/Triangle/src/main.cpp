@@ -34,7 +34,8 @@ const std::vector<const char*> g_deviceExtensions = {
 
 // ---------------------- FOR DEBUG PURPOSES ----------------------
 const std::vector<const char*> g_validationLayers = {
-    "VK_LAYER_KHRONOS_validation"
+    "VK_LAYER_KHRONOS_validation",
+    "VK_LAYER_LUNARG_monitor"
 };
 
 #ifdef NDEBUG
@@ -142,14 +143,17 @@ private:
     std::vector<VkFence> m_inFlightFences;
     size_t m_currentFrame = 0;
 
+    bool m_framebufferResized = false;
+
     void initWindow()
     {
         glfwInit();
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
         
         m_window = glfwCreateWindow(kWindowWidth, kWindowHeight, "Vulkan", nullptr, nullptr);
+        glfwSetWindowUserPointer(m_window, this);
+        glfwSetFramebufferSizeCallback(m_window, framebufferResizeCallback);
     }
 
     void initVulkan()
@@ -187,21 +191,10 @@ private:
             vkDestroyFence(m_logicalDevice, m_inFlightFences[i], nullptr);
         }
 
+        cleanupSwapchain();
+
         vkDestroyCommandPool(m_logicalDevice, m_commandPool, nullptr);
-
-        for (auto& framebuffer : m_swapchainFramebuffers) {
-            vkDestroyFramebuffer(m_logicalDevice, framebuffer, nullptr);
-        }
-
-        vkDestroyPipeline(m_logicalDevice, m_graphicsPipeline, nullptr);
-        vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
-        vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
-
-        for (auto& imageView : m_swapchainImageViews) {
-            vkDestroyImageView(m_logicalDevice, imageView, nullptr);
-        }
-
-        vkDestroySwapchainKHR(m_logicalDevice, m_swapchain, nullptr);
+        
         vkDestroyDevice(m_logicalDevice, nullptr);
 
         if (enableValidationLayers) {
@@ -215,6 +208,53 @@ private:
         glfwTerminate();
     }
     
+    void cleanupSwapchain()
+    {
+        for (auto& framebuffer : m_swapchainFramebuffers) {
+            vkDestroyFramebuffer(m_logicalDevice, framebuffer, nullptr);
+        }
+
+        vkFreeCommandBuffers(m_logicalDevice, m_commandPool, static_cast<uint32_t>(m_commandBuffers.size()), m_commandBuffers.data());
+
+        vkDestroyPipeline(m_logicalDevice, m_graphicsPipeline, nullptr);
+        vkDestroyPipelineLayout(m_logicalDevice, m_pipelineLayout, nullptr);
+        vkDestroyRenderPass(m_logicalDevice, m_renderPass, nullptr);
+
+        for (auto& imageView : m_swapchainImageViews) {
+            vkDestroyImageView(m_logicalDevice, imageView, nullptr);
+        }
+
+        vkDestroySwapchainKHR(m_logicalDevice, m_swapchain, nullptr);
+    }
+
+    // NOTE: "The disadvantage of this approach is that we need to stop all rendering before creating the new
+    //  swapchain. It's possible to create a new swap chain while drawing commands on an image from the old
+    //  swapchain are still in-flight. Need to pass the previous swap chain to the olSwapchain field int the
+    //  VkSwapchainCreateInfoKHR struct and destroy the old swap chain as soon as we finished using it.
+    // Also there is no nedd to reacreate pipeline, especially reading and recreating shaders. May be there is 
+    //  something else.
+    void recreateSwapchain()
+    {
+        // Window minimization handling
+        int width, height;
+        glfwGetFramebufferSize(m_window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwWaitEvents();
+            glfwGetFramebufferSize(m_window, &width, &height);
+        }
+
+        vkDeviceWaitIdle(m_logicalDevice);
+
+        cleanupSwapchain();
+
+        createSwapChain();
+        createImageViews();
+        createRenderPass();
+        createGraphicsPipeline();
+        createFramebuffers();
+        createCommandBuffers();
+    }
+
     void createVkInstance()
     {
         if (enableValidationLayers && !checkValidationLayerSupport()) {
@@ -236,6 +276,7 @@ private:
         createInfo.pApplicationInfo = &applicationInfo;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         createInfo.ppEnabledExtensionNames = extensions.data();
+        
 
         VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo;
         if (enableValidationLayers) {
@@ -387,7 +428,7 @@ private:
         swapchainCreateInfo.imageExtent = extent2d;
         swapchainCreateInfo.imageArrayLayers = 1u;  // always 1 unless you are developing stereoscopic 3D app
         swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-
+        
         QueueFamilyIndices indices = findQueueFamilies(m_physicalDevice);
         uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
@@ -721,11 +762,19 @@ private:
     {
         // TODO: use std::numeric_limits<uint64_t>::max() instead of UINT64_MAX ?
         vkWaitForFences(m_logicalDevice, 1u, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
-        vkResetFences(m_logicalDevice, 1u, &m_inFlightFences[m_currentFrame]);
 
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(m_logicalDevice, m_swapchain, UINT64_MAX, m_imageAvailableSemaphores[m_currentFrame], VK_NULL_HANDLE, &imageIndex);
+        VkResult result = vkAcquireNextImageKHR(m_logicalDevice, m_swapchain, UINT64_MAX, 
+                                                m_imageAvailableSemaphores[m_currentFrame], VK_NULL_HANDLE, &imageIndex);
         
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapchain();
+            return;
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            throw std::runtime_error("Failed to acquire swapchain image.");
+        }
+
         VkSemaphore waitSemphores[] = { m_imageAvailableSemaphores[m_currentFrame] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 
@@ -741,6 +790,8 @@ private:
         submitInfo.signalSemaphoreCount = 1u;
         submitInfo.pSignalSemaphores = signalSemaphores;
         
+        vkResetFences(m_logicalDevice, 1u, &m_inFlightFences[m_currentFrame]);
+
         if (vkQueueSubmit(m_graphicsQueue, 1u, &submitInfo, m_inFlightFences[m_currentFrame]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to submit draw command buffer");
         }
@@ -755,7 +806,15 @@ private:
         presentInfo.pSwapchains = swapchains;
         presentInfo.pImageIndices = &imageIndex;
 
-        vkQueuePresentKHR(m_presentQueue, &presentInfo);
+        result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_framebufferResized) {
+            m_framebufferResized = false;
+            recreateSwapchain();
+        }
+        else if (result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to present swapchain image.");
+        }
 
         m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight;
     }
@@ -796,7 +855,10 @@ private:
         }
 
         // Guaranteed to be available
-        return VK_PRESENT_MODE_FIFO_KHR;
+        //return VK_PRESENT_MODE_FIFO_KHR;
+
+        // For testing puproses.
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
     }
 
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities)
@@ -805,9 +867,16 @@ private:
             return capabilities.currentExtent;
         }
 
-        VkExtent2D actualExtent = {};
-        actualExtent.width = std::clamp(kWindowWidth, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
-        actualExtent.height = std::clamp(kWindowHeight, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+        int width, height;
+        glfwGetFramebufferSize(m_window, &width, &height);
+
+        VkExtent2D actualExtent = {
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height)
+        };
+
+        actualExtent.width = std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+        actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 
         return actualExtent;
     }
@@ -1002,6 +1071,12 @@ private:
         file.close();
 
         return buffer;
+    }
+
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
+    {
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->m_framebufferResized = true;
     }
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
