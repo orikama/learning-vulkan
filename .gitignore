@@ -1,7 +1,6 @@
 # Directories
 .vs/
-bin/
-bin-int/
+out/
 
 # Files
-*.user
+CMakeSettings.json
