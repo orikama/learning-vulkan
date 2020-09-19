@@ -15,10 +15,11 @@ public:
 
     GLFWwindow* GetWindowHandle() const;
 
-    i32 GetWidth() const;
-    i32 GetHeight() const;
+    ui32 GetWidth() const;
+    ui32 GetHeight() const;
 
-    void MainLoop();
+    bool ShouldClose() const;
+    void PollEvents() const;
 
 private:
     GLFWwindow* m_window;

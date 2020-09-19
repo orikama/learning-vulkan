@@ -65,13 +65,24 @@ public:
 
     void Init(const Window& window);
 
+    void DrawFrame();
+    // NOTE: Questionable method
+    void WaitIdle() const;
+
 private:
     void _CreateVkInstance(ui32 apiVersion);
     void _SetupDebugMessenger();
     void _CreateSurface(GLFWwindow* windowHandle);
     void _SelectPhysicalDevice();
     void _CreateLogicalDeviceAndQueues();
-    void _CreateSwapChain();
+    void _CreateSwapchain(ui32 width, ui32 height);
+    void _CreateImageViews();
+    void _CreateRenderPass();
+    void _CreateGraphicsPipeline();
+    void _CreateFramebuffers();
+    void _CreateCommandPool();
+    void _CreateCommandBuffers();
+    void _CreateSemaphores();
 
 private:
     // TODO: There is probably no need to use unique handles, it's pretty easy to manage them manually anyway.
@@ -90,8 +101,29 @@ private:
     vk::PhysicalDevice                  m_physicalDevice;
     vk::UniqueDevice                    m_device;
 
-    vk::Queue m_graphicsQueue;
-    vk::Queue m_presentQueue;
+    vk::Queue                           m_graphicsQueue;
+    vk::Queue                           m_presentQueue;
+
+    vk::UniqueSwapchainKHR              m_swapchain;
+    vk::Format                          m_swapchainFormat;
+    vk::Extent2D                        m_swapchainExtent;
+
+
+    std::vector<vk::Image>              m_swapchainImages;
+    std::vector<vk::UniqueImageView>    m_swapchainImageViews;
+    std::vector<vk::UniqueFramebuffer>  m_framebuffers;
+
+
+    vk::UniqueRenderPass                m_renderPass;
+    // TODO: Move this and all stuff about shaders to its own class, as done in DOOM3 ?
+    vk::UniquePipelineLayout            m_pipelineLayout;
+    vk::UniquePipeline                  m_pipeline;
+
+
+    vk::UniqueCommandPool               m_commandPool;
+    std::vector<vk::CommandBuffer>      m_commandBuffers;
+    vk::UniqueSemaphore                 m_imageAvailableSemaphore;
+    vk::UniqueSemaphore                 m_renderFinishedSemaphore;
 };
 
 }

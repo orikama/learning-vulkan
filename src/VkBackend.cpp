@@ -9,7 +9,14 @@
 #include <limits>
 #include <unordered_set>
 #include <vector>
+#include <array>
+#include <filesystem>
+#include <fstream>
 
+
+// TODO: Remove globals
+const char* kShaderVertexPath = "shader.vspv";
+const char* kShaderFragmentPath = "shader.fspv";
 
 #ifdef NDEBUG
     constexpr bool kEnableValidationLayers = false;
@@ -17,7 +24,7 @@
     constexpr bool kEnableValidationLayers = true;
 #endif
 
-const std::vector<const char*> kValidationLayers{ "VK_LAYER_KHRONOS_validation" };
+const std::vector<const char*> kValidationLayers{ "VK_LAYER_KHRONOS_validation", "VK_LAYER_LUNARG_monitor" };
 const std::vector<const char*> kDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
 
@@ -33,7 +40,7 @@ struct QueueFamilyIndices
     }
 };
 
-struct SwapChainSupportDetails
+struct SwapchainSupportDetails
 {
     std::vector<vk::SurfaceFormatKHR> formats;
     std::vector<vk::PresentModeKHR> presentModes;
@@ -51,8 +58,16 @@ auto _isDeviceSuitable(const vk::PhysicalDevice device,
 auto _getRequiredQueueFamilies(const vk::PhysicalDevice device,
                                const vk::UniqueSurfaceKHR& surface)         -> QueueFamilyIndices;
 auto _checkPhysicalDeviceExtensionSupport(const vk::PhysicalDevice device)  -> bool;
-auto _querySwapChainSupport(const vk::PhysicalDevice device,
-                            const vk::UniqueSurfaceKHR& surface)            -> SwapChainSupportDetails;
+
+auto _querySwapchainSupport(const vk::PhysicalDevice device,
+                            const vk::UniqueSurfaceKHR& surface)            -> SwapchainSupportDetails;
+auto _chooseSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& availableFormats)    -> vk::SurfaceFormatKHR;
+auto _choosePresentMode(const std::vector<vk::PresentModeKHR>& availablePresentModes)   -> vk::PresentModeKHR;
+auto _chooseSurfaceExtent(const vk::SurfaceCapabilitiesKHR& capabilities, ui32 width, ui32 height) -> vk::Extent2D;
+
+auto _readShaderFile(const std::string_view shaderPath)         -> std::vector<char>;
+auto _createShaderModule(const std::vector<char>& shaderCode,
+                         const vk::UniqueDevice& device)        -> vk::UniqueShaderModule;
 
 
 namespace vulkan
@@ -65,7 +80,47 @@ void VkBackend::Init(const Window& window)
     _CreateSurface(window.GetWindowHandle());
     _SelectPhysicalDevice();
     _CreateLogicalDeviceAndQueues();
+    _CreateSwapchain(window.GetWidth(), window.GetHeight());
+    _CreateImageViews();
+    _CreateRenderPass();
+    _CreateGraphicsPipeline();
+    _CreateFramebuffers();
+    _CreateCommandPool();
+    _CreateCommandBuffers();
+    _CreateSemaphores();
 }
+
+
+void VkBackend::DrawFrame()
+{
+    const ui32 imageIndex = m_device->acquireNextImageKHR(m_swapchain.get(), std::numeric_limits<ui64>::max(), m_imageAvailableSemaphore.get(), nullptr);
+    // NOTE: I guess constexpr is useless because of &dstStageMask
+    constexpr vk::PipelineStageFlags dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+
+    vk::SubmitInfo submitInfo{ .waitSemaphoreCount = 1,
+                               .pWaitSemaphores = &m_imageAvailableSemaphore.get(),
+                               .pWaitDstStageMask = &dstStageMask,
+                               .commandBufferCount = 1,
+                               .pCommandBuffers = &m_commandBuffers[imageIndex],
+                               .signalSemaphoreCount = 1,
+                               .pSignalSemaphores = &m_renderFinishedSemaphore.get() };
+
+    m_graphicsQueue.submit(submitInfo, nullptr);
+
+    vk::PresentInfoKHR presentInfo{ .waitSemaphoreCount = 1,
+                                    .pWaitSemaphores = &m_renderFinishedSemaphore.get(),
+                                    .swapchainCount = 1,
+                                    .pSwapchains = &m_swapchain.get(),
+                                    .pImageIndices = &imageIndex };
+
+    m_presentQueue.presentKHR(presentInfo);
+}
+
+void VkBackend::WaitIdle() const
+{
+    m_device->waitIdle();
+}
+
 
 void VkBackend::_CreateVkInstance(const ui32 apiVersion)
 {
@@ -146,7 +201,7 @@ void VkBackend::_SelectPhysicalDevice()
 void VkBackend::_CreateLogicalDeviceAndQueues()
 {
     // TODO: We get queue indices when we select physicalDevice. Need to remove this redundant work.
-    const QueueFamilyIndices indices = _getRequiredQueueFamilies(m_physicalDevice, m_surface);
+    const auto indices = _getRequiredQueueFamilies(m_physicalDevice, m_surface);
 
     const std::unordered_set<ui32> uniqueQueueFamilies{ indices.graphicsFamily.value(),
                                                         indices.presentFamily.value() };
@@ -176,13 +231,272 @@ void VkBackend::_CreateLogicalDeviceAndQueues()
     m_presentQueue = m_device->getQueue(indices.presentFamily.value(), 0);
 }
 
-void VkBackend::_CreateSwapChain()
+// TODO: Remove this width/height shit
+void VkBackend::_CreateSwapchain(ui32 width, ui32 height)
 {
-    auto swapChainSupport = _querySwapChainSupport(m_physicalDevice, m_surface);
+    const auto swapchainSupport = _querySwapchainSupport(m_physicalDevice, m_surface);
 
+    const auto surfaceFormat = _chooseSurfaceFormat(swapchainSupport.formats);
+    const auto presentMode = _choosePresentMode(swapchainSupport.presentModes);
+    const auto extent = _chooseSurfaceExtent(swapchainSupport.capabilities, width, height);
+    // NOTE: Quiestionable
+    ui32 imageCount = swapchainSupport.capabilities.minImageCount + 1;
+    if (swapchainSupport.capabilities.maxImageCount != 0 && imageCount > swapchainSupport.capabilities.maxImageCount) {
+        imageCount = swapchainSupport.capabilities.maxImageCount;
+    }
+
+    vk::SwapchainCreateInfoKHR swapchainInfo{ .surface = m_surface.get(),
+                                              .minImageCount = imageCount,
+                                              .imageFormat = surfaceFormat.format,
+                                              .imageColorSpace = surfaceFormat.colorSpace,
+                                              .imageExtent = extent,
+                                              .imageArrayLayers = 1, // Always 1, unless it's 3D stereoscopic app
+                                              .imageUsage = vk::ImageUsageFlagBits::eColorAttachment,
+                                              .preTransform = swapchainSupport.capabilities.currentTransform, // NOTE: Or no transform?
+                                              .compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque,
+                                              .presentMode = presentMode,
+                                              .clipped = VK_TRUE,
+                                              .oldSwapchain = nullptr };
+
+    // TODO: Nice one tutorial, query same shit for third time
+    const auto indices = _getRequiredQueueFamilies(m_physicalDevice, m_surface);
+    const ui32 familyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
+
+    if (indices.graphicsFamily != indices.presentFamily) {
+        swapchainInfo.imageSharingMode = vk::SharingMode::eConcurrent;
+        swapchainInfo.queueFamilyIndexCount = 2;
+        swapchainInfo.pQueueFamilyIndices = familyIndices;
+    } else {
+        swapchainInfo.imageSharingMode = vk::SharingMode::eExclusive;
+    }
+
+    m_swapchain = m_device->createSwapchainKHRUnique(swapchainInfo);
+    m_swapchainFormat = surfaceFormat.format;
+    m_swapchainExtent = extent;
+
+    m_swapchainImages = m_device->getSwapchainImagesKHR(m_swapchain.get());
+}
+
+void VkBackend::_CreateImageViews()
+{
+    m_swapchainImageViews.reserve(m_swapchainImages.size());
+
+    vk::ComponentMapping componentMapping{ .r = vk::ComponentSwizzle::eIdentity,
+                                           .g = vk::ComponentSwizzle::eIdentity,
+                                           .b = vk::ComponentSwizzle::eIdentity,
+                                           .a = vk::ComponentSwizzle::eIdentity };
+    // NOTE: No mipmap rn. Layers are for stereographic 3D app.
+    vk::ImageSubresourceRange subresiurceRange{ .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                                .baseMipLevel = 0,
+                                                .levelCount = 1,
+                                                .baseArrayLayer = 0,
+                                                .layerCount = 1 };
+
+    vk::ImageViewCreateInfo imageViewInfo{ .viewType = vk::ImageViewType::e2D,
+                                           .format = m_swapchainFormat,
+                                           .components = componentMapping,
+                                           .subresourceRange = subresiurceRange };
+
+    for (const auto& swapchainImage : m_swapchainImages) {
+        imageViewInfo.image = swapchainImage;
+        m_swapchainImageViews.push_back(m_device->createImageViewUnique(imageViewInfo));
+    }
+}
+
+void VkBackend::_CreateRenderPass()
+{
+    vk::AttachmentDescription colorAttachment{ .format = m_swapchainFormat,
+                                               .samples = vk::SampleCountFlagBits::e1,
+                                               .loadOp = vk::AttachmentLoadOp::eClear,
+                                               .storeOp = vk::AttachmentStoreOp::eStore,
+                                               .initialLayout = vk::ImageLayout::eUndefined,
+                                               .finalLayout = vk::ImageLayout::ePresentSrcKHR };
+    // NOTE: This attachment references fragment shader 'layout(location=0) out vec4 outColor' string
+    vk::AttachmentReference colorRef{ .attachment = 0,
+                                      .layout = vk::ImageLayout::eColorAttachmentOptimal };
+    // NOTE: I'm not quite sure what this shit does
+    vk::SubpassDependency dependency{ .srcSubpass = VK_SUBPASS_EXTERNAL,
+                                      .dstSubpass = 0,
+                                      .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                      /*.srcAccessMask = vk::AccessFlags(),*/ // TODO: I DONT FUCKING KNOW WHAT FLAG CORRESPONDS TO '0' NICE TUTORIAL
+                                      .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                      .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite };
+
+    vk::SubpassDescription subpass{ .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
+                                    .colorAttachmentCount = 1,
+                                    .pColorAttachments = &colorRef };
+
+    vk::RenderPassCreateInfo renderPassInfo{ .attachmentCount = 1,
+                                             .pAttachments = &colorAttachment,
+                                             .subpassCount = 1,
+                                             .pSubpasses = &subpass,
+                                             .dependencyCount = 1,
+                                             .pDependencies = &dependency };
+
+    m_renderPass = m_device->createRenderPassUnique(renderPassInfo);
+}
+
+void VkBackend::_CreateGraphicsPipeline()
+{
+    const auto vertShaderCode = _readShaderFile(kShaderVertexPath);
+    const auto fragShaderCode = _readShaderFile(kShaderFragmentPath);
+
+    const auto vertShaderModule = _createShaderModule(vertShaderCode, m_device);
+    const auto fragShaderModule = _createShaderModule(fragShaderCode, m_device);
+
+    // NOTE: .pSpecializationInfo allows specify values for shader constants, it can be more efficient
+    vk::PipelineShaderStageCreateInfo vertShaderStage{ .stage = vk::ShaderStageFlagBits::eVertex,
+                                                       .module = vertShaderModule.get(),
+                                                       .pName = "main" };
+
+    vk::PipelineShaderStageCreateInfo fragShaderStage{ .stage = vk::ShaderStageFlagBits::eFragment,
+                                                       .module = fragShaderModule.get(),
+                                                       .pName = "main" };
+    vk::PipelineShaderStageCreateInfo shaderStages[] = { vertShaderStage, fragShaderStage };
+
+    vk::PipelineVertexInputStateCreateInfo vertexInputState{ .vertexBindingDescriptionCount = 0,
+                                                             .pVertexBindingDescriptions = nullptr,
+                                                             .vertexAttributeDescriptionCount = 0,
+                                                             .pVertexAttributeDescriptions = nullptr };
+
+    vk::PipelineInputAssemblyStateCreateInfo inputAssemblyState{ .topology = vk::PrimitiveTopology::eTriangleList,
+                                                                 .primitiveRestartEnable = VK_FALSE };
+    vk::Viewport viewport{ .x = 0.0f,
+                           .y = 0.0f,
+                           .width = static_cast<float>(m_swapchainExtent.width),
+                           .height = static_cast<float>(m_swapchainExtent.height),
+                           .minDepth = 0.0f,
+                           .maxDepth = 1.0f };
+
+    vk::Rect2D scissor{ .offset = {0, 0},
+                        .extent = m_swapchainExtent };
+
+    vk::PipelineViewportStateCreateInfo viewportState{ .viewportCount = 1,
+                                                       .pViewports = &viewport,
+                                                       .scissorCount = 1,
+                                                       .pScissors = &scissor };
+
+    vk::PipelineRasterizationStateCreateInfo rasterizationState{ .depthClampEnable = VK_FALSE,
+                                                                 .rasterizerDiscardEnable = VK_FALSE,
+                                                                 .polygonMode = vk::PolygonMode::eFill,
+                                                                 .cullMode = vk::CullModeFlagBits::eBack,
+                                                                 .frontFace = vk::FrontFace::eClockwise,
+                                                                 .depthBiasEnable = VK_FALSE,
+                                                                 .depthBiasConstantFactor = 0.0f,
+                                                                 .depthBiasClamp = 0.0f,
+                                                                 .depthBiasSlopeFactor = 0.0f,
+                                                                 .lineWidth = 1.0f };
+
+    vk::PipelineMultisampleStateCreateInfo multisampleState{ .rasterizationSamples = vk::SampleCountFlagBits::e1,
+                                                             .sampleShadingEnable = VK_FALSE };
+
+    //vk::PipelineDepthStencilStateCreateInfo
+
+    vk::ColorComponentFlags colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG
+        | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+    vk::PipelineColorBlendAttachmentState colorBlendAttachment{ .blendEnable = VK_FALSE,
+                                                                .colorWriteMask = colorWriteMask };
+
+    vk::PipelineColorBlendStateCreateInfo colorBlendState{ .logicOpEnable = VK_FALSE,
+                                                           .logicOp = vk::LogicOp::eCopy,
+                                                           .attachmentCount = 1,
+                                                           .pAttachments = &colorBlendAttachment };
+    // NOTE: No uniform variables in shaders for now
+    vk::PipelineLayoutCreateInfo pipelineLayoutInfo{};
+
+    m_pipelineLayout = m_device->createPipelineLayoutUnique(pipelineLayoutInfo);
+
+    vk::GraphicsPipelineCreateInfo graphicsPipelineInfo{ .stageCount = 2,
+                                                         .pStages = shaderStages,
+                                                         .pVertexInputState = &vertexInputState,
+                                                         .pInputAssemblyState = &inputAssemblyState,
+                                                         .pViewportState = &viewportState,
+                                                         .pRasterizationState = &rasterizationState,
+                                                         .pMultisampleState = &multisampleState,
+                                                         .pDepthStencilState = nullptr,
+                                                         .pColorBlendState = &colorBlendState,
+                                                         .pDynamicState = nullptr,
+                                                         .layout = m_pipelineLayout.get(),
+                                                         .renderPass = m_renderPass.get(),
+                                                         .subpass = 0 };
+
+    m_pipeline = m_device->createGraphicsPipelineUnique(nullptr, graphicsPipelineInfo);
+}
+
+void VkBackend::_CreateFramebuffers()
+{
+    m_framebuffers.reserve(m_swapchainImageViews.size());
+
+    vk::ImageView attachments[1];
+
+    vk::FramebufferCreateInfo framebufferInfo{ .renderPass = m_renderPass.get(),
+                                               .attachmentCount = 1,
+                                               .pAttachments = attachments,
+                                               .width = m_swapchainExtent.width,
+                                               .height = m_swapchainExtent.height,
+                                               .layers = 1 };
+
+    for (const auto& imageView : m_swapchainImageViews) {
+        attachments[0] = imageView.get();
+        m_framebuffers.push_back(m_device->createFramebufferUnique(framebufferInfo));
+    }
+}
+
+void VkBackend::_CreateCommandPool()
+{
+    // NOTE: Query same shit for the 4th time
+    const auto queueFamilyIndices = _getRequiredQueueFamilies(m_physicalDevice, m_surface);
+
+    vk::CommandPoolCreateInfo commandPoolInfo{ .flags = vk::CommandPoolCreateFlags(),
+                                               .queueFamilyIndex = queueFamilyIndices.graphicsFamily.value() };
+
+    m_commandPool = m_device->createCommandPoolUnique(commandPoolInfo);
+}
+
+void VkBackend::_CreateCommandBuffers()
+{
+    vk::CommandBufferAllocateInfo commandBufferInfo{ .commandPool = m_commandPool.get(),
+                                                     .level = vk::CommandBufferLevel::ePrimary,
+                                                     .commandBufferCount = static_cast<ui32>(m_framebuffers.size()) };
+
+    m_commandBuffers = m_device->allocateCommandBuffers(commandBufferInfo);
+
+    vk::Rect2D renderArea{ .offset = {0, 0},
+                           .extent = m_swapchainExtent };
+
+    vk::ClearValue clearColor = vk::ClearColorValue(std::array<float, 4>{ 0.0f, 0.0f, 0.0f, 0.0f });
+
+    // NOTE: This should be moved to its own method (StartFrame() ?)
+    for (int i = 0; i < m_commandBuffers.size(); ++i) {
+        const auto& commandBuffer = m_commandBuffers[i];
+
+        vk::CommandBufferBeginInfo beginInfo{};
+
+        vk::RenderPassBeginInfo renderPassInfo{ .renderPass = m_renderPass.get(),
+                                                .framebuffer = m_framebuffers[i].get(),
+                                                .renderArea = renderArea,
+                                                .clearValueCount = 1,
+                                                .pClearValues = &clearColor };
+
+        commandBuffer.begin(beginInfo);
+        commandBuffer.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, m_pipeline.get());
+        commandBuffer.draw(3, 1, 0, 0);
+        commandBuffer.endRenderPass();
+        commandBuffer.end();
+    }
+}
+
+void VkBackend::_CreateSemaphores()
+{
+    vk::SemaphoreCreateInfo semaphoreInfo{};
+
+    m_imageAvailableSemaphore = m_device->createSemaphoreUnique(semaphoreInfo);
+    m_renderFinishedSemaphore = m_device->createSemaphoreUnique(semaphoreInfo);
 }
 
 }
+
 
 
 void _checkAPIVersionSupport(const ui32 requestedVersion)
@@ -256,7 +570,7 @@ bool _isDeviceSuitable(const vk::PhysicalDevice device, const vk::UniqueSurfaceK
     bool isExtensionsSupported = _checkPhysicalDeviceExtensionSupport(device);
     bool isSwapChainAdequate = false;
     if (isExtensionsSupported) {
-        auto swapChainSupport = _querySwapChainSupport(device, surface);
+        auto swapChainSupport = _querySwapchainSupport(device, surface);
         // NOTE: Move this to a SwapChainSupportDetails method? Similar to isComplete()
         isSwapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
     }
@@ -301,12 +615,12 @@ bool _checkPhysicalDeviceExtensionSupport(const vk::PhysicalDevice device)
                        });
 }
 
-SwapChainSupportDetails _querySwapChainSupport(const vk::PhysicalDevice device, const vk::UniqueSurfaceKHR& surface)
+
+SwapchainSupportDetails _querySwapchainSupport(const vk::PhysicalDevice device, const vk::UniqueSurfaceKHR& surface)
 {
-    SwapChainSupportDetails details{ .formats = device.getSurfaceFormatsKHR(surface.get()),
-                                     .presentModes = device.getSurfacePresentModesKHR(surface.get()),
-                                     .capabilities = device.getSurfaceCapabilitiesKHR(surface.get()) };
-    return details;
+    return { .formats = device.getSurfaceFormatsKHR(surface.get()),
+             .presentModes = device.getSurfacePresentModesKHR(surface.get()),
+             .capabilities = device.getSurfaceCapabilitiesKHR(surface.get()) };
 }
 
 vk::SurfaceFormatKHR _chooseSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& availableFormats)
@@ -325,17 +639,13 @@ vk::SurfaceFormatKHR _chooseSurfaceFormat(const std::vector<vk::SurfaceFormatKHR
 
 vk::PresentModeKHR _choosePresentMode(const std::vector<vk::PresentModeKHR>& availablePresentModes)
 {
-    /*for (const auto presentMode : availablePresentModes) {
-        if (presentMode == vk::PresentModeKHR::eMailbox) {
-            return presentMode;
-        }
-    }*/
     // TODO: Rewrite with ranges?
     auto mode = std::find(availablePresentModes.begin(), availablePresentModes.end(), vk::PresentModeKHR::eMailbox);
     if (mode != availablePresentModes.end())
         return *mode;
 
     return vk::PresentModeKHR::eFifo;
+    //return vk::PresentModeKHR::eImmediate;
 }
 
 // NOTE: This 'width', 'height' shit looks ugly
@@ -349,3 +659,23 @@ vk::Extent2D _chooseSurfaceExtent(const vk::SurfaceCapabilitiesKHR& capabilities
              .height = std::clamp(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height) };
 }
 
+
+std::vector<char> _readShaderFile(const std::string_view shaderPath)
+{
+    auto size = std::filesystem::file_size(shaderPath);
+    std::vector<char> buffer(size);
+
+    std::ifstream shaderFile(shaderPath, std::ios::binary | std::ios::in);
+    shaderFile.read(buffer.data(), size);
+
+    return buffer;
+}
+
+vk::UniqueShaderModule _createShaderModule(const std::vector<char>& shaderCode, const vk::UniqueDevice& device)
+{
+    // NOTE: May be read shader file as 'ui32' instead of 'char'
+    vk::ShaderModuleCreateInfo shaderModuleInfo{ .codeSize = shaderCode.size(),
+                                                 .pCode = reinterpret_cast<const ui32*>(shaderCode.data()) };
+
+    return device->createShaderModuleUnique(shaderModuleInfo);
+}

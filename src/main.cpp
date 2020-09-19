@@ -30,7 +30,11 @@ public:
 
     void run()
     {
-        m_window.MainLoop();
+        while (m_window.ShouldClose() == false) {
+            m_window.PollEvents();
+            m_vkBackend.DrawFrame();
+        }
+        m_vkBackend.WaitIdle();
     }
 
 private:

@@ -41,9 +41,12 @@ ui32 Window::GetHeight() const
 }
 
 // NOTE: Questionable method
-void Window::MainLoop()
+bool Window::ShouldClose() const
 {
-    while (glfwWindowShouldClose(m_window) == false) {
-        glfwPollEvents();
-    }
+    return glfwWindowShouldClose(m_window);
+}
+// NOTE: Questionable method
+void Window::PollEvents() const
+{
+    glfwPollEvents();
 }
