@@ -64,13 +64,14 @@ public:
     VkBackend& operator=(const VkBackend&) = delete;
 
     void Init(const Window& window);
+    void Shutdown();
 
     void DrawFrame();
     // NOTE: Questionable method
     void WaitIdle() const;
 
 private:
-    void _CreateVkInstance(ui32 apiVersion);
+    void _CreateInstance(ui32 apiVersion);
     void _SetupDebugMessenger();
     void _CreateSurface(GLFWwindow* windowHandle);
     void _SelectPhysicalDevice();
@@ -81,49 +82,56 @@ private:
     void _CreateGraphicsPipeline();
     void _CreateFramebuffers();
     void _CreateCommandPool();
+    void _CreateVertexBuffer();
     void _CreateCommandBuffers();
-    void _CreateSemaphores();
+    void _CreateSyncPrimitives();
+
+    void _CleanupSwapchain();
+    //void _RecreateSwapchain();
 
 private:
-    // TODO: There is probably no need to use unique handles, it's pretty easy to manage them manually anyway.
-    //  From vulkan.hpp readme:
-    //    Note that using vk::UniqueHandle comes at a cost since most deleters have to store the
-    //    vk::AllocationCallbacks and parent handle used for construction because they are required for automatic destruction.
+    ui64 m_frameCounter;
+    ui32 m_currentFrameData;
 
-    vk::UniqueInstance                  m_vkInstance;
+
+    vk::Instance                    m_instance;
 
     // TODO: I should remove this on release build with preprocessor help,
     //  although probably with more optimization options enabled it will be removed.
-    vk::UniqueDebugUtilsMessengerEXT    m_debugMessenger;
+    vk::DebugUtilsMessengerEXT      m_debugMessenger;
 
-    vk::UniqueSurfaceKHR                m_surface;
+    vk::SurfaceKHR                  m_surface;
 
-    vk::PhysicalDevice                  m_physicalDevice;
-    vk::UniqueDevice                    m_device;
+    vk::PhysicalDevice              m_physicalDevice;
+    vk::Device                      m_device;
 
-    vk::Queue                           m_graphicsQueue;
-    vk::Queue                           m_presentQueue;
+    vk::Queue                       m_graphicsQueue;
+    vk::Queue                       m_presentQueue;
 
-    vk::UniqueSwapchainKHR              m_swapchain;
-    vk::Format                          m_swapchainFormat;
-    vk::Extent2D                        m_swapchainExtent;
-
-
-    std::vector<vk::Image>              m_swapchainImages;
-    std::vector<vk::UniqueImageView>    m_swapchainImageViews;
-    std::vector<vk::UniqueFramebuffer>  m_framebuffers;
+    vk::SwapchainKHR                m_swapchain;
+    vk::Format                      m_swapchainFormat;
+    vk::Extent2D                    m_swapchainExtent;
 
 
-    vk::UniqueRenderPass                m_renderPass;
+    std::vector<vk::Image>          m_swapchainImages;
+    std::vector<vk::ImageView>      m_swapchainImageViews;
+    std::vector<vk::Framebuffer>    m_framebuffers;
+
+
+    vk::RenderPass                  m_renderPass;
     // TODO: Move this and all stuff about shaders to its own class, as done in DOOM3 ?
-    vk::UniquePipelineLayout            m_pipelineLayout;
-    vk::UniquePipeline                  m_pipeline;
+    vk::PipelineLayout              m_pipelineLayout;
+    vk::Pipeline                    m_pipeline;
 
 
-    vk::UniqueCommandPool               m_commandPool;
-    std::vector<vk::CommandBuffer>      m_commandBuffers;
-    vk::UniqueSemaphore                 m_imageAvailableSemaphore;
-    vk::UniqueSemaphore                 m_renderFinishedSemaphore;
+    vk::CommandPool                 m_commandPool;
+    std::vector<vk::CommandBuffer>  m_commandBuffers;
+    std::vector<vk::Semaphore>      m_imageAvailableSemaphores;
+    std::vector<vk::Semaphore>      m_renderFinishedSemaphores;
+    std::vector<vk::Fence>          m_inFlightFences;
+
+    vk::Buffer                      m_vertexBuffer;
+    vk::DeviceMemory                m_vertexBufferMemory;
 };
 
 }

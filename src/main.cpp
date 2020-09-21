@@ -25,6 +25,7 @@ public:
 
     ~TriangleApp()
     {
+        m_vkBackend.Shutdown();
         m_window.Shutdown();
     }
 
