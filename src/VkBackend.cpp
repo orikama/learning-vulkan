@@ -415,8 +415,9 @@ void VkBackend::_CreateRenderPass()
     vk::SubpassDependency dependency{ .srcSubpass = VK_SUBPASS_EXTERNAL,
                                       .dstSubpass = 0,
                                       .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                                      /*.srcAccessMask = vk::AccessFlags(),*/ // TODO: I DONT FUCKING KNOW WHAT FLAG CORRESPONDS TO '0' NICE TUTORIAL
                                       .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                      /*.srcAccessMask = vk::AccessFlags(),*/ // TODO: I DONT FUCKING KNOW WHAT FLAG CORRESPONDS TO '0' NICE TUTORIAL
+                                      .srcAccessMask = vk::AccessFlagBits::eColorAttachmentRead,
                                       .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite };
 
     vk::SubpassDescription subpass{ .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
