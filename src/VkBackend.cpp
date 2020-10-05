@@ -35,6 +35,7 @@ const std::vector<const char*> kDeviceExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAM
 
 
 // NOTE: Can be removed?
+// TODO: Separate transfer queue
 struct QueueFamilyIndices
 {
     std::optional<ui32> graphicsFamily;
@@ -99,25 +100,33 @@ auto _getRequiredExtensions()                               -> std::vector<const
 auto _checkValidationLayersSupport()                        -> bool;
 auto _makeDebugUtilsMessengerCreateInfo()                   -> vk::DebugUtilsMessengerCreateInfoEXT;
 
-auto _isDeviceSuitable(const vk::PhysicalDevice device,
-                       const vk::SurfaceKHR surface)                        -> bool;
-auto _getRequiredQueueFamilies(const vk::PhysicalDevice device,
-                               const vk::SurfaceKHR surface)                -> QueueFamilyIndices;
-auto _checkPhysicalDeviceExtensionSupport(const vk::PhysicalDevice device)  -> bool;
+auto _isDeviceSuitable(const vk::PhysicalDevice& device,
+                       const vk::SurfaceKHR& surface)                        -> bool;
+auto _getRequiredQueueFamilies(const vk::PhysicalDevice& device,
+                               const vk::SurfaceKHR& surface)                -> QueueFamilyIndices;
+auto _checkPhysicalDeviceExtensionSupport(const vk::PhysicalDevice& device)  -> bool;
 
-auto _querySwapchainSupport(const vk::PhysicalDevice device,
-                            const vk::SurfaceKHR surface)            -> SwapchainSupportDetails;
+auto _querySwapchainSupport(const vk::PhysicalDevice& device,
+                            const vk::SurfaceKHR& surface)              -> SwapchainSupportDetails;
 auto _chooseSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>& availableFormats)    -> vk::SurfaceFormatKHR;
 auto _choosePresentMode(const std::vector<vk::PresentModeKHR>& availablePresentModes)   -> vk::PresentModeKHR;
 auto _chooseSurfaceExtent(const vk::SurfaceCapabilitiesKHR& capabilities, ui32 width, ui32 height) -> vk::Extent2D;
 
 auto _readShaderFile(const std::string_view shaderPath)         -> std::vector<char>;
 auto _createShaderModule(const std::vector<char>& shaderCode,
-                         const vk::Device device)               -> vk::UniqueShaderModule;
+                         const vk::Device& device)              -> vk::UniqueShaderModule;
 
-auto _findMemoryTypeIndex(const vk::PhysicalDevice physicalDevice,
+auto _findMemoryTypeIndex(const vk::PhysicalDevice& physicalDevice,
                           const ui32 memoryTypeBits,
-                          const vk::MemoryPropertyFlags properties) -> ui32;
+                          const vk::MemoryPropertyFlags properties)                             -> ui32;
+// NOTE: I think i should make it private method or a friend function
+auto _createBuffer(const vk::PhysicalDevice& physicalDevice, const vk::Device& device,
+                   const vk::DeviceSize bufferSize,
+                   const vk::BufferUsageFlags usage, const vk::MemoryPropertyFlags properties,
+                   vk::Buffer& buffer, vk::DeviceMemory& bufferMemory)                          -> void;
+auto _copyBuffer(const vk::CommandPool& commandPool, const vk::Device& device, const vk::Queue& queue,
+                 vk::Buffer& source, vk::Buffer& destination, vk::DeviceSize size)              -> void;
+
 
 
 namespace vulkan
@@ -128,7 +137,7 @@ void VkBackend::Init(const Window& window)
     m_frameCounter = 0;
     m_currentFrameData = 0;
 
-    _CreateInstance(/*VK_API_VERSION_1_2*/VK_MAKE_VERSION(1, 2, 131));
+    _CreateInstance(/*VK_API_VERSION_1_2*/VK_MAKE_VERSION(1, 2, 135));
     _SetupDebugMessenger();
     _CreateSurface(window.GetWindowHandle());
     _SelectPhysicalDevice();
@@ -547,26 +556,25 @@ void VkBackend::_CreateCommandPool()
 
 void VkBackend::_CreateVertexBuffer()
 {
-    vk::BufferCreateInfo bufferInfo{ .size = sizeof(kTriangleVertices[0]) * kTriangleVertices.size(),
-                                     .usage = vk::BufferUsageFlagBits::eVertexBuffer,
-                                     .sharingMode = vk::SharingMode::eExclusive };
+    vk::DeviceSize bufferSize = sizeof(kTriangleVertices[0]) * kTriangleVertices.size();
 
-    m_vertexBuffer = m_device.createBuffer(bufferInfo);
+    constexpr auto stagingProperties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+    vk::Buffer stagingBuffer;
+    vk::DeviceMemory stagingBufferMemory;
+    _createBuffer(m_physicalDevice, m_device, bufferSize, vk::BufferUsageFlagBits::eTransferSrc, stagingProperties, stagingBuffer, stagingBufferMemory);
 
-    const auto memoryRequirements = m_device.getBufferMemoryRequirements(m_vertexBuffer);
-    constexpr auto memoryProperties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
-    const auto memoryTypeIndex = _findMemoryTypeIndex(m_physicalDevice, memoryRequirements.memoryTypeBits, memoryProperties);
+    ui8* data = static_cast<ui8*>(m_device.mapMemory(stagingBufferMemory, 0, bufferSize));
+    std::memcpy(data, kTriangleVertices.data(), bufferSize);
+    //std::copy(kTriangleVertices.data(), kTriangleVertices.data() + bufferSize, data);
+    m_device.unmapMemory(stagingBufferMemory);
 
-    vk::MemoryAllocateInfo allocateInfo{ .allocationSize = memoryRequirements.size,
-                                         .memoryTypeIndex = memoryTypeIndex };
+    constexpr auto bufferUsage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer;
+    _createBuffer(m_physicalDevice, m_device, bufferSize, bufferUsage, vk::MemoryPropertyFlagBits::eDeviceLocal, m_vertexBuffer, m_vertexBufferMemory);
 
-    m_vertexBufferMemory = m_device.allocateMemory(allocateInfo);
-    m_device.bindBufferMemory(m_vertexBuffer, m_vertexBufferMemory, 0);
+    _copyBuffer(m_commandPool, m_device, m_graphicsQueue, stagingBuffer, m_vertexBuffer, bufferSize);
 
-    ui8* data = static_cast<ui8*>(m_device.mapMemory(m_vertexBufferMemory, 0, bufferInfo.size));
-    std::memcpy(data, kTriangleVertices.data(), bufferInfo.size);
-    //std::copy(kTriangleVertices.data(), kTriangleVertices.data() + bufferInfo.size, data);
-    m_device.unmapMemory(m_vertexBufferMemory);
+    m_device.destroyBuffer(stagingBuffer);
+    m_device.freeMemory(stagingBufferMemory);
 }
 
 void VkBackend::_CreateCommandBuffers()
@@ -728,7 +736,7 @@ vk::DebugUtilsMessengerCreateInfoEXT _makeDebugUtilsMessengerCreateInfo()
 
 
 // NOTE: Fuckin surface
-bool _isDeviceSuitable(const vk::PhysicalDevice device, const vk::SurfaceKHR surface)
+bool _isDeviceSuitable(const vk::PhysicalDevice& device, const vk::SurfaceKHR& surface)
 {
     bool isQueueFamiliesSupported = _getRequiredQueueFamilies(device, surface).isComplete();
     bool isExtensionsSupported = _checkPhysicalDeviceExtensionSupport(device);
@@ -743,7 +751,7 @@ bool _isDeviceSuitable(const vk::PhysicalDevice device, const vk::SurfaceKHR sur
 }
 
 // NOTE: Depends on m_surface, make it private method ?
-QueueFamilyIndices _getRequiredQueueFamilies(const vk::PhysicalDevice device, const vk::SurfaceKHR surface)
+QueueFamilyIndices _getRequiredQueueFamilies(const vk::PhysicalDevice& device, const vk::SurfaceKHR& surface)
 {
     QueueFamilyIndices indices;
 
@@ -766,7 +774,7 @@ QueueFamilyIndices _getRequiredQueueFamilies(const vk::PhysicalDevice device, co
     return indices;
 }
 
-bool _checkPhysicalDeviceExtensionSupport(const vk::PhysicalDevice device)
+bool _checkPhysicalDeviceExtensionSupport(const vk::PhysicalDevice& device)
 {
     const auto availableExtensions = device.enumerateDeviceExtensionProperties();
 
@@ -780,7 +788,7 @@ bool _checkPhysicalDeviceExtensionSupport(const vk::PhysicalDevice device)
 }
 
 
-SwapchainSupportDetails _querySwapchainSupport(const vk::PhysicalDevice device, const vk::SurfaceKHR surface)
+SwapchainSupportDetails _querySwapchainSupport(const vk::PhysicalDevice& device, const vk::SurfaceKHR& surface)
 {
     return { .formats = device.getSurfaceFormatsKHR(surface),
              .presentModes = device.getSurfacePresentModesKHR(surface),
@@ -835,7 +843,7 @@ std::vector<char> _readShaderFile(const std::string_view shaderPath)
     return buffer;
 }
 
-vk::UniqueShaderModule _createShaderModule(const std::vector<char>& shaderCode, const vk::Device device)
+vk::UniqueShaderModule _createShaderModule(const std::vector<char>& shaderCode, const vk::Device& device)
 {
     // NOTE: May be read shader file as 'ui32' instead of 'char'
     vk::ShaderModuleCreateInfo shaderModuleInfo{ .codeSize = shaderCode.size(),
@@ -845,7 +853,7 @@ vk::UniqueShaderModule _createShaderModule(const std::vector<char>& shaderCode, 
 }
 
 
-ui32 _findMemoryTypeIndex(const vk::PhysicalDevice physicalDevice, const ui32 memoryTypeBits, const vk::MemoryPropertyFlags properties)
+ui32 _findMemoryTypeIndex(const vk::PhysicalDevice& physicalDevice, const ui32 memoryTypeBits, const vk::MemoryPropertyFlags properties)
 {
     auto memoryProperties = physicalDevice.getMemoryProperties();
 
@@ -856,4 +864,53 @@ ui32 _findMemoryTypeIndex(const vk::PhysicalDevice physicalDevice, const ui32 me
     }
 
     throw std::runtime_error("_findMemoryType(): Failed to find suitable memory type!");
+}
+
+void _createBuffer(const vk::PhysicalDevice& physicalDevice, const vk::Device& device,
+                   const vk::DeviceSize bufferSize,
+                   const vk::BufferUsageFlags usage, const vk::MemoryPropertyFlags properties,
+                   vk::Buffer& buffer, vk::DeviceMemory& bufferMemory)
+{
+    vk::BufferCreateInfo bufferInfo{ .size = bufferSize,
+                                     .usage = usage,
+                                     .sharingMode = vk::SharingMode::eExclusive };
+
+    buffer = device.createBuffer(bufferInfo);
+
+    const auto memoryRequirements = device.getBufferMemoryRequirements(buffer);
+    const auto memoryTypeIndex = _findMemoryTypeIndex(physicalDevice, memoryRequirements.memoryTypeBits, properties);
+
+    vk::MemoryAllocateInfo allocateInfo{ .allocationSize = memoryRequirements.size,
+                                         .memoryTypeIndex = memoryTypeIndex };
+
+    bufferMemory = device.allocateMemory(allocateInfo);
+    device.bindBufferMemory(buffer, bufferMemory, 0);
+}
+
+void _copyBuffer(const vk::CommandPool& commandPool, const vk::Device& device, const vk::Queue& queue,
+                 vk::Buffer& source, vk::Buffer& destination, vk::DeviceSize size)
+{
+    vk::CommandBufferAllocateInfo allocateInfo{ .commandPool = commandPool,
+                                                .level = vk::CommandBufferLevel::ePrimary,
+                                                .commandBufferCount = 1 };
+
+    vk::CommandBuffer commandBuffer;
+    device.allocateCommandBuffers(&allocateInfo, &commandBuffer);
+
+    vk::CommandBufferBeginInfo beginInfo{ .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit };
+
+    commandBuffer.begin(beginInfo);
+    {
+        vk::BufferCopy copyRegion{ .size = size };
+        commandBuffer.copyBuffer(source, destination, 1, &copyRegion);
+    }
+    commandBuffer.end();
+
+    vk::SubmitInfo submitInfo{ .commandBufferCount = 1,
+                              .pCommandBuffers = &commandBuffer };
+
+    queue.submit(1, &submitInfo, nullptr);
+    queue.waitIdle();
+
+    device.freeCommandBuffers(commandPool, 1, &commandBuffer);
 }
