@@ -2,9 +2,9 @@
 #extension GL_ARB_separate_shader_objects : enable
 
 
-layout(location = 0) in vec3 in_fragColor;
+in layout(location = 0) vec3 in_fragColor;
 
-layout(location = 0) out vec4 out_color;
+out layout(location = 0) vec4 out_color;
 
 
 void main()

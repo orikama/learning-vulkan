@@ -79,18 +79,28 @@ private:
     void _CreateSwapchain(ui32 width, ui32 height);
     void _CreateImageViews();
     void _CreateRenderPass();
+
+    void _CreateDescriptorSetLayout();
     void _CreateGraphicsPipeline();
+
     void _CreateFramebuffers();
     void _CreateCommandPool();
 
     void _CreateVertexBuffer();
     void _CreateIndexBuffer();
+    void _CreateUniformBuffers();
+
+    void _CreateDescriptorPool();
+    void _CreateDescriptorSets();
 
     void _CreateCommandBuffers();
     void _CreateSyncPrimitives();
 
+
     void _CleanupSwapchain();
     //void _RecreateSwapchain();
+
+    void _UpdateUniformBuffers(ui32 imageIndex);
 
 private:
     ui64 m_frameCounter;
@@ -122,6 +132,7 @@ private:
 
 
     vk::RenderPass                  m_renderPass;
+    vk::DescriptorSetLayout         m_descriptorSetLayout;
     // TODO: Move this and all stuff about shaders to its own class, as done in DOOM3 ?
     vk::PipelineLayout              m_pipelineLayout;
     vk::Pipeline                    m_pipeline;
@@ -138,6 +149,12 @@ private:
     vk::DeviceMemory                m_vertexBufferMemory;
     vk::Buffer                      m_indexBuffer;
     vk::DeviceMemory                m_indexBufferMemory;
+
+    std::vector<vk::Buffer>         m_uniformBuffers;
+    std::vector<vk::DeviceMemory>   m_uniformBuffersMemory;
+
+    vk::DescriptorPool              m_descriptorPool;
+    std::vector<vk::DescriptorSet>  m_descriptorSets;
 };
 
 }

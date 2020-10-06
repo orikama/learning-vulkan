@@ -12,9 +12,14 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
 
+#define GLM_FORCE_RADIANS
+//#define GLM_FORCE_LEFT_HANDED
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 
 // TODO: Remove globals
@@ -88,6 +93,14 @@ private:
     static const ui32 kBinding = 0; // FINDOUT: WTF is this
 };
 
+struct UBO_MVP
+{
+    glm::mat4 model;
+    glm::mat4 view;
+    glm::mat4 projection;
+};
+
+
 const std::vector<Vertex> kTriangleVertices = {
     {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
@@ -150,12 +163,19 @@ void VkBackend::Init(const Window& window)
     _CreateSwapchain(window.GetWidth(), window.GetHeight());
     _CreateImageViews();
     _CreateRenderPass();
+
+    _CreateDescriptorSetLayout();
     _CreateGraphicsPipeline();
+
     _CreateFramebuffers();
     _CreateCommandPool();
 
     _CreateVertexBuffer();
     _CreateIndexBuffer();
+    _CreateUniformBuffers();
+
+    _CreateDescriptorPool();
+    _CreateDescriptorSets();
 
     _CreateCommandBuffers();
     _CreateSyncPrimitives();
@@ -176,6 +196,8 @@ void VkBackend::Shutdown()
 
     _CleanupSwapchain();
 
+    m_device.destroyDescriptorSetLayout(m_descriptorSetLayout);
+
     m_device.destroyCommandPool(m_commandPool);
     m_device.destroy();
 
@@ -195,6 +217,9 @@ void VkBackend::DrawFrame()
 
     const ui32 imageIndex = m_device.acquireNextImageKHR(m_swapchain, kSyncObjectTimeout,
                                                          m_imageAvailableSemaphores[m_currentFrameData], nullptr);
+
+    _UpdateUniformBuffers(imageIndex);
+
     // NOTE: I guess constexpr is useless because of &dstStageMask
     constexpr vk::PipelineStageFlags dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
 
@@ -314,7 +339,7 @@ void VkBackend::_CreateLogicalDeviceAndQueues()
     std::vector<vk::DeviceQueueCreateInfo> queueInfos;
     queueInfos.reserve(uniqueQueueFamilies.size());
 
-    constexpr float queuePriority = 1.0f; // NOTE: same for every queue
+    constexpr f32 queuePriority = 1.0f; // NOTE: same for every queue
     for (ui32 queueFamily : uniqueQueueFamilies) {
         queueInfos.push_back(vk::DeviceQueueCreateInfo{ .queueFamilyIndex = queueFamily,
                                                         .queueCount = 1,
@@ -447,6 +472,22 @@ void VkBackend::_CreateRenderPass()
     m_renderPass = m_device.createRenderPass(renderPassInfo);
 }
 
+
+void VkBackend::_CreateDescriptorSetLayout()
+{
+    // NOTE: This is where the shader reflection can help
+    vk::DescriptorSetLayoutBinding uboLayoutBinding{ .binding = 0,
+                                                     .descriptorType = vk::DescriptorType::eUniformBuffer,
+                                                     .descriptorCount = 1,
+                                                     .stageFlags = vk::ShaderStageFlagBits::eVertex,
+                                                     .pImmutableSamplers = nullptr};
+
+    vk::DescriptorSetLayoutCreateInfo descriptorLayoutInfo{ .bindingCount = 1,
+                                                            .pBindings = &uboLayoutBinding };
+
+    m_descriptorSetLayout = m_device.createDescriptorSetLayout(descriptorLayoutInfo);
+}
+
 void VkBackend::_CreateGraphicsPipeline()
 {
     const auto vertShaderCode = _readShaderFile(kShaderVertexPath);
@@ -470,7 +511,6 @@ void VkBackend::_CreateGraphicsPipeline()
 
     vk::PipelineVertexInputStateCreateInfo vertexInputState{ .vertexBindingDescriptionCount = 1,
                                                              .pVertexBindingDescriptions = &bindingDescription,
-                                                             // NOTE: Why it works without casting to ui32
                                                              .vertexAttributeDescriptionCount = static_cast<ui32>(attributeDescription.size()),
                                                              .pVertexAttributeDescriptions = attributeDescription.data() };
 
@@ -478,8 +518,8 @@ void VkBackend::_CreateGraphicsPipeline()
                                                                  .primitiveRestartEnable = VK_FALSE };
     vk::Viewport viewport{ .x = 0.0f,
                            .y = 0.0f,
-                           .width = static_cast<float>(m_swapchainExtent.width),
-                           .height = static_cast<float>(m_swapchainExtent.height),
+                           .width = static_cast<f32>(m_swapchainExtent.width),
+                           .height = static_cast<f32>(m_swapchainExtent.height),
                            .minDepth = 0.0f,
                            .maxDepth = 1.0f };
 
@@ -490,12 +530,12 @@ void VkBackend::_CreateGraphicsPipeline()
                                                        .pViewports = &viewport,
                                                        .scissorCount = 1,
                                                        .pScissors = &scissor };
-
+    // NOTE: How the fuck the inversion of Y-axis affects frontFace (or it can be fixed by changing cullMode to eFront)
     vk::PipelineRasterizationStateCreateInfo rasterizationState{ .depthClampEnable = VK_FALSE,
                                                                  .rasterizerDiscardEnable = VK_FALSE,
                                                                  .polygonMode = vk::PolygonMode::eFill,
                                                                  .cullMode = vk::CullModeFlagBits::eBack,
-                                                                 .frontFace = vk::FrontFace::eClockwise,
+                                                                 .frontFace = vk::FrontFace::eCounterClockwise, // NOTE: was clockwise until UBO kicked in
                                                                  .depthBiasEnable = VK_FALSE,
                                                                  .depthBiasConstantFactor = 0.0f,
                                                                  .depthBiasClamp = 0.0f,
@@ -516,8 +556,9 @@ void VkBackend::_CreateGraphicsPipeline()
                                                            .logicOp = vk::LogicOp::eCopy,
                                                            .attachmentCount = 1,
                                                            .pAttachments = &colorBlendAttachment };
-    // NOTE: No uniform variables in shaders for now
-    vk::PipelineLayoutCreateInfo pipelineLayoutInfo{};
+
+    vk::PipelineLayoutCreateInfo pipelineLayoutInfo{ .setLayoutCount = 1,
+                                                     .pSetLayouts = &m_descriptorSetLayout };
 
     m_pipelineLayout = m_device.createPipelineLayout(pipelineLayoutInfo);
 
@@ -542,6 +583,7 @@ void VkBackend::_CreateGraphicsPipeline()
     // NOTE: Idk why I need this cast only there, everywhere else it just works LOOOOOOOOOOOOOOOOOOOOOOOOOOOL
     m_pipeline = (vk::Pipeline&&)m_device.createGraphicsPipeline(nullptr, graphicsPipelineInfo);
 }
+
 
 void VkBackend::_CreateFramebuffers()
 {
@@ -601,12 +643,12 @@ void VkBackend::_CreateVertexBuffer()
 //  Although it seems like I need to use templates for that and put this code to header so fuck that for now
 void VkBackend::_CreateIndexBuffer()
 {
-    vk::DeviceSize bufferSize = sizeof(kTriangleIndices[0]) * kTriangleIndices.size();
+    const vk::DeviceSize bufferSize = sizeof(kTriangleIndices[0]) * kTriangleIndices.size();
 
-    constexpr auto stagingProperties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+    constexpr auto memoryProperties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
     vk::Buffer stagingBuffer;
     vk::DeviceMemory stagingBufferMemory;
-    _createBuffer(m_physicalDevice, m_device, bufferSize, vk::BufferUsageFlagBits::eTransferSrc, stagingProperties, stagingBuffer, stagingBufferMemory);
+    _createBuffer(m_physicalDevice, m_device, bufferSize, vk::BufferUsageFlagBits::eTransferSrc, memoryProperties, stagingBuffer, stagingBufferMemory);
 
     ui8* data = static_cast<ui8*>(m_device.mapMemory(stagingBufferMemory, 0, bufferSize));
     std::memcpy(data, kTriangleIndices.data(), bufferSize);
@@ -622,6 +664,65 @@ void VkBackend::_CreateIndexBuffer()
     m_device.freeMemory(stagingBufferMemory);
 }
 
+void VkBackend::_CreateUniformBuffers()
+{
+    const vk::DeviceSize bufferSize = sizeof(UBO_MVP);
+    constexpr auto memoryProperties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+
+    const auto size = m_swapchainImages.size();
+    m_uniformBuffers.resize(size);
+    m_uniformBuffersMemory.resize(size);
+
+    for (size_t i = 0; i < size; ++i) {
+        _createBuffer(m_physicalDevice, m_device, bufferSize, vk::BufferUsageFlagBits::eUniformBuffer, memoryProperties,
+                      m_uniformBuffers[i], m_uniformBuffersMemory[i]);
+    }
+}
+
+
+void VkBackend::_CreateDescriptorPool()
+{
+    const auto descriptorCount = static_cast<ui32>(m_swapchainImages.size());
+
+    vk::DescriptorPoolSize poolSize{ .type = vk::DescriptorType::eUniformBuffer,
+                                     .descriptorCount = descriptorCount };
+
+    vk::DescriptorPoolCreateInfo poolInfo{ //.flags = vk::DescriptorPoolCreateFlagBits,
+                                           .maxSets = descriptorCount,
+                                           .poolSizeCount = 1,
+                                           .pPoolSizes = &poolSize };
+
+    m_descriptorPool = m_device.createDescriptorPool(poolInfo);
+}
+
+void VkBackend::_CreateDescriptorSets()
+{
+    const auto descriptorCount = static_cast<ui32>(m_swapchainImages.size());
+
+    std::vector<vk::DescriptorSetLayout> layouts(descriptorCount, m_descriptorSetLayout);
+
+    vk::DescriptorSetAllocateInfo descriptorSetInfo{ .descriptorPool = m_descriptorPool,
+                                                     .descriptorSetCount = descriptorCount,
+                                                     .pSetLayouts = layouts.data() };
+
+    m_descriptorSets = m_device.allocateDescriptorSets(descriptorSetInfo);
+
+    vk::DescriptorBufferInfo descriptorBuffer{ .offset = 0,
+                                               .range = sizeof(UBO_MVP) };
+
+    vk::WriteDescriptorSet descriptorWrite{ .dstBinding = 0,
+                                            .dstArrayElement = 0,
+                                            .descriptorCount = 1,
+                                            .descriptorType = vk::DescriptorType::eUniformBuffer,
+                                            .pBufferInfo = &descriptorBuffer };
+
+    for (ui32 i = 0; i < descriptorCount; ++i) {
+        descriptorBuffer.buffer = m_uniformBuffers[i];
+        descriptorWrite.dstSet = m_descriptorSets[i];
+        m_device.updateDescriptorSets(1, &descriptorWrite, 0, nullptr);
+    }
+}
+
 
 void VkBackend::_CreateCommandBuffers()
 {
@@ -634,7 +735,7 @@ void VkBackend::_CreateCommandBuffers()
     vk::Rect2D renderArea{ .offset = {0, 0},
                            .extent = m_swapchainExtent };
 
-    vk::ClearValue clearColor = vk::ClearColorValue(std::array<float, 4>{ 0.0f, 0.0f, 0.0f, 0.0f });
+    vk::ClearValue clearColor = vk::ClearColorValue(std::array<f32, 4>{ 0.0f, 0.0f, 0.0f, 0.0f });
 
     // NOTE: This should be moved to its own method (StartFrame() ?)
     for (int i = 0; i < m_commandBuffers.size(); ++i) {
@@ -655,6 +756,7 @@ void VkBackend::_CreateCommandBuffers()
 
             commandBuffer.bindVertexBuffers(0, m_vertexBuffer, { 0 });
             commandBuffer.bindIndexBuffer(m_indexBuffer, 0, vk::IndexType::eUint16);
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_pipelineLayout, 0, 1, &m_descriptorSets[i], 0, nullptr);
 
             commandBuffer.drawIndexed(static_cast<ui32>(kTriangleIndices.size()), 1, 0, 0, 0);
         }
@@ -683,6 +785,13 @@ void VkBackend::_CreateSyncPrimitives()
 
 void VkBackend::_CleanupSwapchain()
 {
+    m_device.destroyDescriptorPool(m_descriptorPool);
+
+    for (size_t i = 0; i < m_swapchainImages.size(); ++i) {
+        m_device.destroyBuffer(m_uniformBuffers[i]);
+        m_device.freeMemory(m_uniformBuffersMemory[i]);
+    }
+
     for (auto framebuffer : m_framebuffers) {
         m_device.destroyFramebuffer(framebuffer);
     }
@@ -714,7 +823,32 @@ void VkBackend::_CleanupSwapchain()
 //    _CreateGraphicsPipeline();
 //    _CreateFramebuffers();
 //    _CreateCommandBuffers();
+//    _CreateUniformBuffers();
+//    _CreateDescriptorPool();
+//    _CreateDescriptorSets();
 //}
+
+
+// NOTE: There are more efficient ways to pass data to shaders, like "push constants"
+// NOTE: Only model matrix changes every frame, and projection changes when window is resized
+void VkBackend::_UpdateUniformBuffers(ui32 imageIndex)
+{
+    static auto startTime = std::chrono::high_resolution_clock::now();
+
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration<f32, std::chrono::seconds::period>(currentTime - startTime).count();
+
+    // NOTE: Y axis inversion in projection matrix
+    UBO_MVP mvp{ .model = glm::rotate(glm::mat4(1.0f), duration * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f)),
+                 .view = glm::lookAt(glm::vec3(2.0f), glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 1.0f)),
+                 .projection = glm::perspective(glm::radians(45.0f), f32(m_swapchainExtent.width) / m_swapchainExtent.height, 0.1f, 10.0f) };
+
+    mvp.projection[1][1] *= -1.0f;
+
+    auto data = m_device.mapMemory(m_uniformBuffersMemory[imageIndex], 0, sizeof(mvp));
+    std::memcpy(data, &mvp, sizeof(mvp));
+    m_device.unmapMemory(m_uniformBuffersMemory[imageIndex]);
+}
 
 }
 
@@ -915,6 +1049,8 @@ ui32 _findMemoryTypeIndex(const vk::PhysicalDevice& physicalDevice, const ui32 m
     throw std::runtime_error("_findMemoryType(): Failed to find suitable memory type!");
 }
 
+// NOTE: This function is called many times, and every time it calls getBufferMemoryRequirements() and findMemoryTypeIndex,
+//  which is most likely redundant and I should just store this memory things
 void _createBuffer(const vk::PhysicalDevice& physicalDevice, const vk::Device& device,
                    const vk::DeviceSize bufferSize,
                    const vk::BufferUsageFlags usage, const vk::MemoryPropertyFlags properties,
