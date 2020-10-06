@@ -89,9 +89,14 @@ private:
 };
 
 const std::vector<Vertex> kTriangleVertices = {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f,  0.5f}, {1.0f, 1.0f, 1.0f}}
+};
+
+const std::vector<ui16> kTriangleIndices = {
+    0, 1, 2, 2, 3, 0
 };
 
 
@@ -148,7 +153,10 @@ void VkBackend::Init(const Window& window)
     _CreateGraphicsPipeline();
     _CreateFramebuffers();
     _CreateCommandPool();
+
     _CreateVertexBuffer();
+    _CreateIndexBuffer();
+
     _CreateCommandBuffers();
     _CreateSyncPrimitives();
 }
@@ -161,6 +169,8 @@ void VkBackend::Shutdown()
         m_device.destroyFence(m_inFlightFences[i]);
     }
 
+    m_device.destroyBuffer(m_indexBuffer);
+    m_device.freeMemory(m_indexBufferMemory);
     m_device.destroyBuffer(m_vertexBuffer);
     m_device.freeMemory(m_vertexBufferMemory);
 
@@ -347,10 +357,10 @@ void VkBackend::_CreateSwapchain(ui32 width, ui32 height)
                                               .imageFormat = surfaceFormat.format,
                                               .imageColorSpace = surfaceFormat.colorSpace,
                                               .imageExtent = extent,
-                                              .imageArrayLayers = 1, // Always 1, unless it's 3D stereoscopic app
+                                              .imageArrayLayers = 1, // NOTE: Always 1, unless it's 3D stereoscopic app
                                               .imageUsage = vk::ImageUsageFlagBits::eColorAttachment,
-                                              .preTransform = swapchainSupport.capabilities.currentTransform, // NOTE: Or no transform?
-                                              .compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque,
+                                              .preTransform = swapchainSupport.capabilities.currentTransform, // NOTE: Seems like this is for mobile
+                                              .compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque, // NOTE: 'Opaque' is not guaranteed to be supported
                                               .presentMode = presentMode,
                                               .clipped = VK_TRUE,
                                               .oldSwapchain = nullptr };
@@ -376,14 +386,12 @@ void VkBackend::_CreateSwapchain(ui32 width, ui32 height)
 
 void VkBackend::_CreateImageViews()
 {
-    m_swapchainImageViews.reserve(m_swapchainImages.size());
-
     vk::ComponentMapping componentMapping{ .r = vk::ComponentSwizzle::eIdentity,
                                            .g = vk::ComponentSwizzle::eIdentity,
                                            .b = vk::ComponentSwizzle::eIdentity,
                                            .a = vk::ComponentSwizzle::eIdentity };
     // NOTE: No mipmap rn. Layers are for stereographic 3D app.
-    vk::ImageSubresourceRange subresiurceRange{ .aspectMask = vk::ImageAspectFlagBits::eColor,
+    vk::ImageSubresourceRange subresourceRange{ .aspectMask = vk::ImageAspectFlagBits::eColor,
                                                 .baseMipLevel = 0,
                                                 .levelCount = 1,
                                                 .baseArrayLayer = 0,
@@ -392,7 +400,9 @@ void VkBackend::_CreateImageViews()
     vk::ImageViewCreateInfo imageViewInfo{ .viewType = vk::ImageViewType::e2D,
                                            .format = m_swapchainFormat,
                                            .components = componentMapping,
-                                           .subresourceRange = subresiurceRange };
+                                           .subresourceRange = subresourceRange };
+
+    m_swapchainImageViews.reserve(m_swapchainImages.size());
 
     for (const auto& swapchainImage : m_swapchainImages) {
         imageViewInfo.image = swapchainImage;
@@ -406,19 +416,22 @@ void VkBackend::_CreateRenderPass()
                                                .samples = vk::SampleCountFlagBits::e1,
                                                .loadOp = vk::AttachmentLoadOp::eClear,
                                                .storeOp = vk::AttachmentStoreOp::eStore,
-                                               .initialLayout = vk::ImageLayout::eUndefined,
+                                               .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+                                               .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+                                               .initialLayout = vk::ImageLayout::eUndefined,    // NOTE: undefined ???
                                                .finalLayout = vk::ImageLayout::ePresentSrcKHR };
     // NOTE: This attachment references fragment shader 'layout(location=0) out vec4 outColor' string
     vk::AttachmentReference colorRef{ .attachment = 0,
                                       .layout = vk::ImageLayout::eColorAttachmentOptimal };
+
     // NOTE: I'm not quite sure what this shit does
-    vk::SubpassDependency dependency{ .srcSubpass = VK_SUBPASS_EXTERNAL,
-                                      .dstSubpass = 0,
-                                      .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                                      .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                                      /*.srcAccessMask = vk::AccessFlags(),*/ // TODO: I DONT FUCKING KNOW WHAT FLAG CORRESPONDS TO '0' NICE TUTORIAL
-                                      .srcAccessMask = vk::AccessFlagBits::eColorAttachmentRead,
-                                      .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite };
+    //vk::SubpassDependency dependency{ .srcSubpass = VK_SUBPASS_EXTERNAL,
+    //                                  .dstSubpass = 0,
+    //                                  .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+    //                                  .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+    //                                  /*.srcAccessMask = vk::AccessFlags(),*/ // TODO: I DONT FUCKING KNOW WHAT FLAG CORRESPONDS TO '0' NICE TUTORIAL
+    //                                  .srcAccessMask = vk::AccessFlagBits::eColorAttachmentRead,
+    //                                  .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite };
 
     vk::SubpassDescription subpass{ .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
                                     .colorAttachmentCount = 1,
@@ -428,8 +441,8 @@ void VkBackend::_CreateRenderPass()
                                              .pAttachments = &colorAttachment,
                                              .subpassCount = 1,
                                              .pSubpasses = &subpass,
-                                             .dependencyCount = 1,
-                                             .pDependencies = &dependency };
+                                             /*.dependencyCount = 1,
+                                             .pDependencies = &dependency*/ };
 
     m_renderPass = m_device.createRenderPass(renderPassInfo);
 }
@@ -458,7 +471,7 @@ void VkBackend::_CreateGraphicsPipeline()
     vk::PipelineVertexInputStateCreateInfo vertexInputState{ .vertexBindingDescriptionCount = 1,
                                                              .pVertexBindingDescriptions = &bindingDescription,
                                                              // NOTE: Why it works without casting to ui32
-                                                             .vertexAttributeDescriptionCount = attributeDescription.size(),
+                                                             .vertexAttributeDescriptionCount = static_cast<ui32>(attributeDescription.size()),
                                                              .pVertexAttributeDescriptions = attributeDescription.data() };
 
     vk::PipelineInputAssemblyStateCreateInfo inputAssemblyState{ .topology = vk::PrimitiveTopology::eTriangleList,
@@ -508,6 +521,11 @@ void VkBackend::_CreateGraphicsPipeline()
 
     m_pipelineLayout = m_device.createPipelineLayout(pipelineLayoutInfo);
 
+    /*vk::DynamicState dynamicStates[] = { vk::DynamicState::eViewport, vk::DynamicState::eScissor };
+
+    vk::PipelineDynamicStateCreateInfo dynamicStateInfo{ .dynamicStateCount = sizeof(dynamicStates) / sizeof(dynamicStates[0]),
+                                                         .pDynamicStates = dynamicStates };*/
+
     vk::GraphicsPipelineCreateInfo graphicsPipelineInfo{ .stageCount = 2,
                                                          .pStages = shaderStages,
                                                          .pVertexInputState = &vertexInputState,
@@ -555,6 +573,7 @@ void VkBackend::_CreateCommandPool()
     m_commandPool = m_device.createCommandPool(commandPoolInfo);
 }
 
+
 void VkBackend::_CreateVertexBuffer()
 {
     vk::DeviceSize bufferSize = sizeof(kTriangleVertices[0]) * kTriangleVertices.size();
@@ -577,6 +596,32 @@ void VkBackend::_CreateVertexBuffer()
     m_device.destroyBuffer(stagingBuffer);
     m_device.freeMemory(stagingBufferMemory);
 }
+
+// TODO: Why do we need an almost identical to _CreateVertexBuffer() function?
+//  Although it seems like I need to use templates for that and put this code to header so fuck that for now
+void VkBackend::_CreateIndexBuffer()
+{
+    vk::DeviceSize bufferSize = sizeof(kTriangleIndices[0]) * kTriangleIndices.size();
+
+    constexpr auto stagingProperties = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+    vk::Buffer stagingBuffer;
+    vk::DeviceMemory stagingBufferMemory;
+    _createBuffer(m_physicalDevice, m_device, bufferSize, vk::BufferUsageFlagBits::eTransferSrc, stagingProperties, stagingBuffer, stagingBufferMemory);
+
+    ui8* data = static_cast<ui8*>(m_device.mapMemory(stagingBufferMemory, 0, bufferSize));
+    std::memcpy(data, kTriangleIndices.data(), bufferSize);
+    //std::copy(kTriangleVertices.data(), kTriangleVertices.data() + bufferSize, data);
+    m_device.unmapMemory(stagingBufferMemory);
+
+    constexpr auto bufferUsage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndexBuffer;
+    _createBuffer(m_physicalDevice, m_device, bufferSize, bufferUsage, vk::MemoryPropertyFlagBits::eDeviceLocal, m_indexBuffer, m_indexBufferMemory);
+
+    _copyBuffer(m_commandPool, m_device, m_graphicsQueue, stagingBuffer, m_indexBuffer, bufferSize);
+
+    m_device.destroyBuffer(stagingBuffer);
+    m_device.freeMemory(stagingBufferMemory);
+}
+
 
 void VkBackend::_CreateCommandBuffers()
 {
@@ -605,11 +650,14 @@ void VkBackend::_CreateCommandBuffers()
 
         commandBuffer.begin(beginInfo);
         commandBuffer.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, m_pipeline);
+        {
+            commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, m_pipeline);
 
-        commandBuffer.bindVertexBuffers(0, m_vertexBuffer, { 0 });
-        commandBuffer.draw(kTriangleVertices.size(), 1, 0, 0);
+            commandBuffer.bindVertexBuffers(0, m_vertexBuffer, { 0 });
+            commandBuffer.bindIndexBuffer(m_indexBuffer, 0, vk::IndexType::eUint16);
 
+            commandBuffer.drawIndexed(static_cast<ui32>(kTriangleIndices.size()), 1, 0, 0, 0);
+        }
         commandBuffer.endRenderPass();
         commandBuffer.end();
     }
@@ -639,7 +687,7 @@ void VkBackend::_CleanupSwapchain()
         m_device.destroyFramebuffer(framebuffer);
     }
 
-    m_device.freeCommandBuffers(m_commandPool, m_commandBuffers.size(), m_commandBuffers.data());
+    m_device.freeCommandBuffers(m_commandPool, static_cast<ui32>(m_commandBuffers.size()), m_commandBuffers.data());
 
     m_device.destroyPipeline(m_pipeline);
     m_device.destroyPipelineLayout(m_pipelineLayout);

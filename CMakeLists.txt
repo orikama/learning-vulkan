@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(LearningVulkan)
+project(LearningVulkan CXX)
 
 
 find_package(Vulkan REQUIRED)

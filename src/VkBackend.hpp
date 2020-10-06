@@ -82,7 +82,10 @@ private:
     void _CreateGraphicsPipeline();
     void _CreateFramebuffers();
     void _CreateCommandPool();
+
     void _CreateVertexBuffer();
+    void _CreateIndexBuffer();
+
     void _CreateCommandBuffers();
     void _CreateSyncPrimitives();
 
@@ -130,8 +133,11 @@ private:
     std::vector<vk::Semaphore>      m_renderFinishedSemaphores;
     std::vector<vk::Fence>          m_inFlightFences;
 
+    // NOTE: The 'Index buffer' chapter of vulkan-tutorial says that it may be more efficient to store vertex nad index buffers in one vk::Buffer
     vk::Buffer                      m_vertexBuffer;
     vk::DeviceMemory                m_vertexBufferMemory;
+    vk::Buffer                      m_indexBuffer;
+    vk::DeviceMemory                m_indexBufferMemory;
 };
 
 }
